@@ -1,0 +1,9 @@
+# Holds the GitHub token and the cookie encryption key — never commit it.
+extension/config.js
+
+# Per-account configs (tokens + cookie keys) — never commit
+.configs/
+
+__pycache__/
+build-*/
+*.zip

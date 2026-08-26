@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube Proxy — הגדרות</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="hd">
+        <div class="hd__logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="24" height="24">
+            <path fill="currentColor" d="M17 18v1.5H7V18h10zM12 3v9.4l3.2-3.2 1.06 1.06L11.99 15 7.74 10.32 8.8 9.26 12 12.4V3z" />
+          </svg>
+        </div>
+        <div>
+          <h1>YouTube Proxy</h1>
+          <p class="muted">ההורדה רצה ב-GitHub Actions ולא במחשב שלכם. התוסף רק שולח את הקישור והעוגיות, ומושך את הקובץ בסיום.</p>
+          <p class="muted small" id="version"></p>
+        </div>
+      </header>
+
+      <section class="card">
+        <h2>חיבור</h2>
+        <div class="conn">
+          <span class="dot" id="conn-dot"></span>
+          <div class="conn__main">
+            <div id="conn-text">לא נבדק</div>
+          </div>
+          <button class="btn" id="recheck" type="button">בדיקת חיבור</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>ריפו</h2>
+
+        <div class="field">
+          <label class="field__label" for="owner">בעלים (owner)</label>
+          <input id="owner" class="input" dir="ltr" spellcheck="false" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="repo">שם הריפו</label>
+          <input id="repo" class="input" dir="ltr" spellcheck="false" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="workflow">קובץ הוורקפלואו</label>
+          <input id="workflow" class="input" dir="ltr" spellcheck="false" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="ref">ענף (ref)</label>
+          <input id="ref" class="input" dir="ltr" spellcheck="false" autocomplete="off" />
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>אבטחה</h2>
+
+        <div class="field">
+          <label class="field__label" for="token">
+            טוקן GitHub — fine-grained, על הריפו הזה בלבד, עם הרשאת Actions: Read and write
+          </label>
+          <input id="token" class="input" type="password" dir="ltr" spellcheck="false" autocomplete="off" placeholder="github_pat_..." />
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="cookieKey">
+            COOKIE_KEY — 64 תווי hex. חייב להיות זהה ל-secret בשם COOKIE_KEY בריפו
+          </label>
+          <input id="cookieKey" class="input" dir="ltr" spellcheck="false" autocomplete="off" />
+        </div>
+
+        <p class="muted small">
+          הריפו ציבורי, ולכן העוגיות נשלחות מוצפנות (AES-256-GCM) ומפוענחות רק בתוך הריצה עצמה.
+          הטוקן וה-COOKIE_KEY נשמרים רק בדפדפן הזה ולא נשלחים לשום מקום מלבד api.github.com.
+        </p>
+
+        <div class="row">
+          <button class="btn btn--primary" id="save" type="button">שמור</button>
+          <button class="btn btn--danger" id="reset" type="button">אפס לברירות המחדל</button>
+        </div>
+        <p class="msg" id="msg" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>איך מפיקים טוקן</h2>
+        <p class="muted small">
+          GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.
+          תחת Repository access בוחרים Only select repositories ומסמנים את הריפו הזה בלבד, ותחת Permissions מגדירים
+          <strong>Actions: Read and write</strong> — וזו ההרשאה היחידה שנדרשת.
+        </p>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" hidden></div>
+    <script src="options.js"></script>
+  </body>
+</html>

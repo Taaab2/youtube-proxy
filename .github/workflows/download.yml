@@ -1,0 +1,659 @@
+name: download
+run-name: dl-${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'Unique download id (used for run-name + artifact name)'
+        required: true
+        type: string
+      url:
+        description: 'Video / page URL (in list mode, any one of them — the real list is in `urls`)'
+        required: true
+        type: string
+      quality:
+        description: 'best | 1080 | 720 | 480 | audio'
+        required: false
+        default: 'best'
+        type: string
+      mode:
+        description: 'video (single item) | collection (whole channel/playlist, zipped) | list (several explicit URLs, batched + zipped)'
+        required: false
+        default: 'video'
+        type: string
+      urls:
+        description: 'list mode only: JSON array of URLs to download together, batched across jobs and zipped'
+        required: false
+        default: ''
+        type: string
+      cookies_enc:
+        description: 'AES-256-GCM encrypted cookies.txt, base64 (iv|ct|tag). Leave empty for none.'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write # needed to publish the finished file as a Release asset (github.com
+                  # download, which works behind Netfree unlike the artifact CDN)
+
+concurrency:
+  group: dl-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  # ------------------------------------------------------------- single video/audio
+  resolve-video:
+    if: inputs.mode != 'collection' && inputs.mode != 'list'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate request id
+        run: |
+          case "${{ inputs.request_id }}" in
+            *[!a-zA-Z0-9-]*|"") echo "::error::request_id must be [a-zA-Z0-9-] only"; exit 1;;
+          esac
+
+      # yt-dlp needs a JS runtime (Deno) plus the actual challenge-solver script to
+      # pass YouTube's "n" parameter check. Deno alone isn't enough — without also
+      # passing --remote-components ejs:github (below, on the real yt-dlp calls),
+      # yt-dlp skips the solver and every video fails with "The page needs to be
+      # reloaded", found live: https://github.com/yt-dlp/yt-dlp/wiki/EJS
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # ffmpeg used to come from apt, which meant an apt-get update plus resolving
+      # and unpacking ~15 transitive codec libraries (libva2, libvpl2, ...) every
+      # single run — ~30s measured live, the actual bottleneck, not GitHub finding
+      # the run. imageio-ffmpeg ships a static ffmpeg binary as a normal pip wheel
+      # (one download from PyPI, no apt at all), cutting that to a few seconds.
+      - name: Install yt-dlp + ffmpeg
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet --upgrade yt-dlp cryptography imageio-ffmpeg curl_cffi
+          if command -v zip >/dev/null 2>&1; then
+            : # already on the runner image, no apt needed
+          else
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq zip
+          fi
+          if command -v ffmpeg >/dev/null 2>&1; then
+            FFMPEG_BIN=$(command -v ffmpeg)
+          else
+            FFMPEG_BIN=$(python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")
+            chmod +x "$FFMPEG_BIN"
+          fi
+          echo "FFMPEG_BIN=$FFMPEG_BIN" >> "$GITHUB_ENV"
+          yt-dlp --version
+          "$FFMPEG_BIN" -version | head -1
+
+      - name: Decrypt cookies
+        if: ${{ inputs.cookies_enc != '' }}
+        env:
+          COOKIES_ENC: ${{ inputs.cookies_enc }}
+          COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
+        run: |
+          if [ -z "$COOKIE_KEY" ]; then
+            echo "::error::repository secret COOKIE_KEY is missing"
+            exit 1
+          fi
+          python - <<'PY'
+          import base64, os, sys
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          blob = base64.b64decode(os.environ["COOKIES_ENC"])
+          key = bytes.fromhex(os.environ["COOKIE_KEY"].strip())
+          iv, ct = blob[:12], blob[12:]
+          try:
+              data = AESGCM(key).decrypt(iv, ct, None)
+          except Exception:
+              print("::error::cookie decryption failed - COOKIE_KEY in the extension and in the repo secret do not match")
+              sys.exit(1)
+          with open("cookies.txt", "wb") as f:
+              f.write(data)
+          print(f"cookies.txt written ({len(data)} bytes)")
+          PY
+
+      - name: Download
+        env:
+          TARGET_URL: ${{ inputs.url }}
+          QUALITY: ${{ inputs.quality }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          mkdir -p out
+          case "$QUALITY" in
+            audio) FMT_ARGS="-f bestaudio/best -x --audio-format mp3 --audio-quality 0" ;;
+            1080)  FMT_ARGS="-f bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b --merge-output-format mp4" ;;
+            720)   FMT_ARGS="-f bv*[height<=720]+ba/b[height<=720]/bv*+ba/b --merge-output-format mp4" ;;
+            480)   FMT_ARGS="-f bv*[height<=480]+ba/b[height<=480]/bv*+ba/b --merge-output-format mp4" ;;
+            *)     FMT_ARGS="-f bv*+ba/b --merge-output-format mp4" ;;
+          esac
+
+          COOKIE_ARGS=""
+          if [ -f cookies.txt ]; then COOKIE_ARGS="--cookies cookies.txt"; fi
+          # Optional: set a repo secret PROXY_URL to route through a residential IP,
+          # which is the only thing that clears sites that block GitHub's datacenter IP
+          # (e.g. Cloudflare "Just a moment" that even a real browser can't pass here).
+          PROXY_ARGS=""
+          if [ -n "$PROXY_URL" ]; then PROXY_ARGS="--proxy $PROXY_URL"; fi
+
+          run_ytdlp() {
+            yt-dlp \
+              $FMT_ARGS $PROXY_ARGS "$@" \
+              --no-playlist --no-progress --newline \
+              --retries 5 --fragment-retries 10 \
+              --embed-metadata \
+              --remote-components ejs:github \
+              --ffmpeg-location "$FFMPEG_BIN" \
+              -o "out/%(title).120B [%(id)s].%(ext)s" \
+              -- "$TARGET_URL"
+          }
+
+          # Retry ladder so a download succeeds in as many cases as possible:
+          #  - alternate youtube player clients (helps youtube without cookies; a no-op
+          #    on other sites since yt-dlp only applies youtube extractor-args to youtube)
+          #  - --impersonate: curl_cffi mimics a real browser's TLS fingerprint, which
+          #    clears Cloudflare "anti-bot" 403s that block many news/video sites
+          #  - a final rung with no cookies at all, in case stale cookies were the cause
+          IMP="generic:impersonate"
+          ALT="youtube:player_client=default,tv,web_safari,mweb,tv_embedded"
+          if run_ytdlp $COOKIE_ARGS --extractor-args "$IMP"; then :
+          elif run_ytdlp $COOKIE_ARGS --extractor-args "$ALT"; then :
+          elif run_ytdlp $COOKIE_ARGS --impersonate chrome; then :
+          elif run_ytdlp --extractor-args "$IMP" --extractor-args "$ALT"; then :
+          else
+            echo "::error::download failed for this URL (the site may require being signed in, or blocks automated downloads)"
+            rm -f cookies.txt
+            exit 1
+          fi
+
+          rm -f cookies.txt
+          ls -la out
+
+      - name: Always drop cookies
+        if: always()
+        run: rm -f cookies.txt
+
+      # Publish the finished file as a Release asset. Its download URL lives on
+      # github.com / githubusercontent.com - the same domains the extension's own
+      # self-updater already pulls from behind Netfree - whereas the Actions artifact
+      # below is served from Azure blob storage, which Netfree blocks. The extension
+      # downloads the release asset directly and also shows its link for IDM.
+      - name: Publish as Release (Netfree-friendly download)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # these jobs don't checkout, so gh needs this
+          TAG: dl-${{ inputs.request_id }}
+        run: |
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" --title "$TAG" --notes "Automated download - safe to delete."
+          # gh treats each asset arg as a glob pattern, so yt-dlp's [id] brackets (and any
+          # * ? in a title) match nothing -> "no matches found". Escape those metachars so
+          # gh matches the literal file. find handles spaces; sed backslash-escapes globs.
+          find out -type f -print0 | while IFS= read -r -d '' f; do
+            esc=$(printf '%s' "$f" | sed 's/[][*?\\]/\\&/g')
+            gh release upload "$TAG" "$esc" --clobber
+          done
+          # Keep the Releases page tidy: drop auto bundles beyond the newest 25.
+          # Wrapped so an empty list (grep exit 1 under pipefail) never fails the job.
+          {
+            gh release list --limit 200 --json tagName,createdAt \
+              --jq 'sort_by(.createdAt) | reverse | .[].tagName' 2>/dev/null \
+              | grep '^dl-' | tail -n +26 \
+              | while read -r old; do gh release delete "$old" --yes --cleanup-tag 2>/dev/null || true; done
+          } || true
+
+      - name: Upload artifact (fallback for non-Netfree / private repos)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dl-${{ inputs.request_id }}
+          path: out/
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+
+  # ------------------------------------------------- collection: list what's in it
+  # A separate job because a matrix's item list has to be known before that matrix's
+  # jobs are scheduled — this can't be computed inside the same job that uses it.
+  # --flat-playlist only reads the listing page, no per-item extraction, so this is
+  # fast and doesn't need Deno/ffmpeg/challenge-solving at all.
+  enumerate:
+    if: inputs.mode == 'collection' || inputs.mode == 'list'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      batches: ${{ steps.list.outputs.batches }}
+      collection_name: ${{ steps.list.outputs.name }}
+      item_count: ${{ steps.list.outputs.count }}
+    steps:
+      - name: Validate request id
+        run: |
+          case "${{ inputs.request_id }}" in
+            *[!a-zA-Z0-9-]*|"") echo "::error::request_id must be [a-zA-Z0-9-] only"; exit 1;;
+          esac
+
+      - name: List collection items
+        id: list
+        env:
+          TARGET_URL: ${{ inputs.url }}
+          MODE: ${{ inputs.mode }}
+          URLS: ${{ inputs.urls }}
+          COOKIES_ENC: ${{ inputs.cookies_enc }}
+          COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet --upgrade yt-dlp cryptography
+          python - <<'PY'
+          import base64, json, os, re, secrets, sys
+          from urllib.parse import urlsplit, urlunsplit
+
+          import yt_dlp
+
+          TARGET_URL = os.environ["TARGET_URL"]
+          MODE = os.environ.get("MODE", "collection")
+          # High safety cap only (a runaway guard). Items are batched across jobs below,
+          # so this is not the old 200-per-channel limit.
+          MAX_ITEMS = 2000
+          # Speed model: every job pays a fixed ~40s of setup (Deno + pip installs)
+          # before it downloads anything, and GitHub Free runs at most ~20 jobs at once
+          # (the rest queue). So the fastest layout is one batch per concurrent slot:
+          #   - fewer than CONCURRENCY jobs  -> runners sit idle (slower)
+          #   - many more than CONCURRENCY   -> the same 20 slots, but the ~40s setup is
+          #                                     paid over and over for no extra parallelism
+          # Making one job per video (the old batch_size==1) was the worst case: a 198-video
+          # channel paid that setup 198 times. We instead spread the videos over ~CONCURRENCY
+          # batches so setup is paid ~20 times total. MAX_BATCH keeps any single job from
+          # growing so large it risks the 120-min timeout or loses many videos if it dies.
+          CONCURRENCY = 20
+          MAX_BATCH = 40
+
+          cookies_path = None
+          cookies_enc = os.environ.get("COOKIES_ENC", "")
+          cookie_key = os.environ.get("COOKIE_KEY", "")
+          if cookies_enc and cookie_key:
+              from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+              blob = base64.b64decode(cookies_enc)
+              key = bytes.fromhex(cookie_key.strip())
+              iv, ct = blob[:12], blob[12:]
+              try:
+                  data = AESGCM(key).decrypt(iv, ct, None)
+              except Exception:
+                  print("::error::cookie decryption failed - COOKIE_KEY in the extension and in the repo secret do not match")
+                  sys.exit(1)
+              with open("cookies.txt", "wb") as f:
+                  f.write(data)
+              cookies_path = "cookies.txt"
+
+          def safe_name(name, limit=120):
+              name = (name or "").strip()
+              if not name or name == "NA":
+                  return None
+              cleaned = re.sub(r'[ /\\:*?"<>|]+', "_", name)
+              return cleaned[:limit] or None
+
+          def resolve_url(entry):
+              u = entry.get("url") or entry.get("webpage_url")
+              if not u:
+                  return None
+              if u.startswith("http://") or u.startswith("https://"):
+                  return u
+              return f"https://www.youtube.com/watch?v={u}"
+
+          ydl_opts = {
+              "extract_flat": True,
+              "quiet": True,
+              "no_warnings": True,
+              "skip_download": True,
+              "playlistend": MAX_ITEMS,  # bounds each individual listing call too, not just the total
+          }
+          if cookies_path:
+              ydl_opts["cookiefile"] = cookies_path
+
+          def flat_list(url):
+              with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                  return ydl.extract_info(url, download=False)
+
+          # Shared by both collection and list mode so the batch planning (below) is
+          # identical everywhere: aim for ~CONCURRENCY jobs, split further only past
+          # MAX_BATCH. This is what "jobs planned correctly, always" means here.
+          def emit_batches(items, collection_name):
+              if len(items) >= MAX_ITEMS:
+                  print(f"::notice::stopping at {MAX_ITEMS} items - this collection may have more")
+              target_jobs = min(len(items), CONCURRENCY)
+              batch_size = max(1, -(-len(items) // target_jobs))  # ceil division
+              batch_size = min(batch_size, MAX_BATCH)
+              batches = [
+                  {"i": idx, "items": items[start:start + batch_size]}
+                  for idx, start in enumerate(range(0, len(items), batch_size))
+              ]
+              album_count = len({i["album"] for i in items if i["album"]})
+              print(f"collection: {collection_name} ({len(items)} items, {album_count} albums, "
+                    f"{len(batches)} batches of up to {batch_size})")
+              delim = f"ghadelim_{secrets.token_hex(8)}"
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+                  f.write(f"batches<<{delim}\n{json.dumps(batches)}\n{delim}\n")
+                  f.write(f"name={collection_name}\n")
+                  f.write(f"count={len(items)}\n")
+
+          # list mode: a set of explicit URLs pasted together. No enumeration needed -
+          # each URL is one item; batch them across jobs exactly like a channel's videos.
+          if MODE == "list":
+              try:
+                  url_list = json.loads(os.environ.get("URLS") or "[]")
+              except Exception:
+                  url_list = []
+              items, seen = [], set()
+              for u in url_list:
+                  u = u.strip() if isinstance(u, str) else ""
+                  if u and u not in seen and len(items) < MAX_ITEMS:
+                      seen.add(u)
+                      items.append({"id": u, "url": u, "album": ""})
+              if not items:
+                  print("::error::list mode: no valid URLs were provided")
+                  sys.exit(1)
+              emit_batches(items, "downloads")
+              sys.exit(0)
+
+          info = flat_list(TARGET_URL)
+          collection_name = (
+              safe_name(info.get("title") or info.get("playlist_title") or info.get("channel") or info.get("uploader"))
+              or "collection"
+          )
+
+          items = []
+          host = urlsplit(TARGET_URL).netloc.removeprefix("www.").removeprefix("m.")
+          is_youtube = host in ("youtube.com", "music.youtube.com")
+          # The "list its Playlists tab" trick below is YouTube's own URL scheme
+          # (.../playlists) — only try it there. Any other site, or a YouTube URL
+          # that's already a specific playlist (?list=...), gets the flat listing.
+          is_single_playlist = (not is_youtube) or "list=" in TARGET_URL
+
+          seen_ids = set()
+
+          def add_entries(entries, album):
+              for e in entries or []:
+                  if not e or len(items) >= MAX_ITEMS:
+                      continue
+                  vid = e.get("id")
+                  url = resolve_url(e)
+                  # Dedupe by video id: a video that's both in a playlist and a loose
+                  # upload is kept once, in the playlist folder (playlists run first).
+                  if vid and url and vid not in seen_ids:
+                      seen_ids.add(vid)
+                      items.append({"id": vid, "url": url, "album": album})
+
+          if is_single_playlist:
+              # A specific playlist (or a non-YouTube site) — one flat level, no album split.
+              add_entries(info.get("entries"), "")
+          else:
+              # A channel: mirror how it organizes itself. Each of the channel's own
+              # playlists becomes a folder (album, live set, ...); videos uploaded to the
+              # channel but not in any playlist go into the root of the zip. Nothing is
+              # left out, and nothing is downloaded twice.
+              parts = urlsplit(TARGET_URL)
+              segs = [s for s in parts.path.split("/") if s]
+              if segs and segs[0] in ("channel", "c", "user") and len(segs) >= 2:
+                  base = "/" + "/".join(segs[:2])
+              elif segs and segs[0].startswith("@"):
+                  base = "/" + segs[0]
+              else:
+                  base = "/" + segs[0] if segs else ""
+              netloc = parts.netloc or "www.youtube.com"
+
+              def channel_tab(tab):
+                  return urlunsplit((parts.scheme or "https", netloc, base.rstrip("/") + "/" + tab, "", ""))
+
+              # 1. playlists -> one folder each
+              playlists = []
+              try:
+                  pl_info = flat_list(channel_tab("playlists"))
+                  for e in pl_info.get("entries") or []:
+                      if e and e.get("id"):
+                          playlists.append({"id": e["id"], "title": e.get("title") or e["id"]})
+              except Exception:
+                  playlists = []
+              for pl in playlists:
+                  if len(items) >= MAX_ITEMS:
+                      break
+                  album = safe_name(pl["title"], limit=80) or pl["id"]
+                  try:
+                      pl_videos = flat_list(f"https://www.youtube.com/playlist?list={pl['id']}")
+                  except Exception:
+                      continue
+                  add_entries(pl_videos.get("entries"), album)
+
+              # 2. loose uploads (Videos / Shorts / Streams tabs) -> root of the zip,
+              #    skipping any already pulled in via a playlist above.
+              for tab in ("videos", "shorts", "streams"):
+                  if len(items) >= MAX_ITEMS:
+                      break
+                  try:
+                      add_entries(flat_list(channel_tab(tab)).get("entries"), "")
+                  except Exception:
+                      continue
+
+              # 3. last resort: whatever the bare channel URL lists (rarely needed).
+              if not items:
+                  add_entries(info.get("entries"), "")
+
+          if os.path.exists("cookies.txt"):
+              os.remove("cookies.txt")
+
+          if not items:
+              print("::error::this channel or playlist has no public videos to download (it may be empty, or its content needs sign-in)")
+              sys.exit(1)
+
+          # Same batch planning as list mode (see emit_batches above): ~CONCURRENCY jobs,
+          # each downloading a group of videos, split further only past MAX_BATCH.
+          emit_batches(items, collection_name)
+          PY
+
+  # ------------------------------------------ collection: one job per batch of items
+  # Each matrix job downloads a batch (group) of videos. GitHub caps a matrix at 256
+  # jobs, so batching is what lets a large channel exceed the old 200-video limit while
+  # still running in parallel. The extension reads each job's status for "X of Y batches"
+  # progress (a step's internal progress isn't visible from outside while it runs).
+  download-item:
+    if: inputs.mode == 'collection' || inputs.mode == 'list'
+    needs: enumerate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true # one bad batch shouldn't fail the whole collection
+    strategy:
+      fail-fast: false
+      max-parallel: 20 # GitHub Free runs at most ~20 jobs at once; use all of them
+      matrix:
+        batch: ${{ fromJson(needs.enumerate.outputs.batches) }}
+    name: download-item ${{ matrix.batch.i }}
+    steps:
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install yt-dlp + ffmpeg
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet --upgrade yt-dlp cryptography imageio-ffmpeg curl_cffi
+          if command -v ffmpeg >/dev/null 2>&1; then
+            FFMPEG_BIN=$(command -v ffmpeg)
+          else
+            FFMPEG_BIN=$(python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")
+            chmod +x "$FFMPEG_BIN"
+          fi
+          echo "FFMPEG_BIN=$FFMPEG_BIN" >> "$GITHUB_ENV"
+
+      - name: Decrypt cookies
+        if: ${{ inputs.cookies_enc != '' }}
+        env:
+          COOKIES_ENC: ${{ inputs.cookies_enc }}
+          COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
+        run: |
+          if [ -z "$COOKIE_KEY" ]; then
+            echo "::error::repository secret COOKIE_KEY is missing"
+            exit 1
+          fi
+          python - <<'PY'
+          import base64, os, sys
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          blob = base64.b64decode(os.environ["COOKIES_ENC"])
+          key = bytes.fromhex(os.environ["COOKIE_KEY"].strip())
+          iv, ct = blob[:12], blob[12:]
+          try:
+              data = AESGCM(key).decrypt(iv, ct, None)
+          except Exception:
+              print("::error::cookie decryption failed - COOKIE_KEY in the extension and in the repo secret do not match")
+              sys.exit(1)
+          with open("cookies.txt", "wb") as f:
+              f.write(data)
+          PY
+
+      - name: Download batch
+        env:
+          BATCH_JSON: ${{ toJson(matrix.batch.items) }}
+          QUALITY: ${{ inputs.quality }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          mkdir -p out
+          case "$QUALITY" in
+            audio) FMT_ARGS="-f bestaudio/best -x --audio-format mp3 --audio-quality 0" ;;
+            1080)  FMT_ARGS="-f bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b --merge-output-format mp4" ;;
+            720)   FMT_ARGS="-f bv*[height<=720]+ba/b[height<=720]/bv*+ba/b --merge-output-format mp4" ;;
+            480)   FMT_ARGS="-f bv*[height<=480]+ba/b[height<=480]/bv*+ba/b --merge-output-format mp4" ;;
+            *)     FMT_ARGS="-f bv*+ba/b --merge-output-format mp4" ;;
+          esac
+
+          COOKIE_ARGS=""
+          if [ -f cookies.txt ]; then COOKIE_ARGS="--cookies cookies.txt"; fi
+          PROXY_ARGS=""
+          if [ -n "$PROXY_URL" ]; then PROXY_ARGS="--proxy $PROXY_URL"; fi
+
+          # url<TAB>album per line, so the loop below reads the batch safely regardless
+          # of characters in album names.
+          printf '%s' "$BATCH_JSON" | python -c "
+          import json, sys
+          for it in json.load(sys.stdin):
+              print(it['url'] + '\t' + (it.get('album') or ''))
+          " > batch.tsv
+
+          run_ytdlp() {
+            # $1 = output template, rest = extra args, last = the URL (passed via $URL)
+            local tmpl="$1"; shift
+            yt-dlp \
+              $FMT_ARGS $PROXY_ARGS "$@" \
+              --no-playlist --no-progress --newline \
+              --retries 5 --fragment-retries 10 \
+              --embed-metadata \
+              --remote-components ejs:github \
+              --ffmpeg-location "$FFMPEG_BIN" \
+              -o "$tmpl" \
+              -- "$URL"
+          }
+
+          IMP="generic:impersonate"
+          ALT="youtube:player_client=default,tv,web_safari,mweb,tv_embedded"
+          FAILED=0
+          # How many files this job was handed, so each line below reads "file N of TOTAL
+          # assigned to this job" in the live log — intra-job progress GitHub can't show
+          # from the outside.
+          TOTAL=$(grep -c . batch.tsv)
+          N=0
+          while IFS=$'\t' read -r URL ALBUM; do
+            [ -z "$URL" ] && continue
+            N=$((N+1))
+            echo "::group::file $N of $TOTAL assigned to this job: $URL"
+            # The channel's own playlists become subfolders inside the final zip.
+            if [ -n "$ALBUM" ]; then
+              TMPL="out/$ALBUM/%(title).100B [%(id)s].%(ext)s"
+            else
+              TMPL="out/%(title).100B [%(id)s].%(ext)s"
+            fi
+            # Same retry ladder as the single-video job (impersonate clears Cloudflare).
+            if   run_ytdlp "$TMPL" $COOKIE_ARGS --extractor-args "$IMP"; then :
+            elif run_ytdlp "$TMPL" $COOKIE_ARGS --extractor-args "$ALT"; then :
+            elif run_ytdlp "$TMPL" $COOKIE_ARGS --impersonate chrome; then :
+            elif run_ytdlp "$TMPL" --extractor-args "$IMP" --extractor-args "$ALT"; then :
+            else
+              echo "::warning::failed to download $URL"
+              FAILED=$((FAILED+1))
+            fi
+            echo "::endgroup::"
+          done < batch.tsv
+          rm -f batch.tsv cookies.txt
+          echo "batch done: $((N-FAILED)) of $TOTAL succeeded ($FAILED failed)"
+
+      - name: Always drop cookies
+        if: always()
+        run: rm -f cookies.txt
+
+      - name: Upload batch artifact
+        if: hashFiles('out/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: dl-${{ inputs.request_id }}-item-${{ matrix.batch.i }}
+          path: out/
+          retention-days: 1
+          compression-level: 0
+
+  # --------------------------------------------------- collection: zip it all up
+  package:
+    if: always() && (inputs.mode == 'collection' || inputs.mode == 'list') && needs.enumerate.result == 'success'
+    needs: [enumerate, download-item]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Collect item artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dl-${{ inputs.request_id }}-item-*
+          path: merged
+          merge-multiple: true
+
+      - name: Zip the collection
+        run: |
+          mkdir -p out
+          if [ -z "$(ls -A merged 2>/dev/null)" ]; then
+            echo "::error::every item in this collection failed to download"
+            exit 1
+          fi
+          (cd merged && zip -r -q "../out/${{ needs.enumerate.outputs.collection_name }}.zip" .)
+          echo "packaged $(find merged -type f | wc -l) of ${{ needs.enumerate.outputs.item_count }} items"
+
+      # Publish the single ZIP as a Release asset (github.com download that works behind
+      # Netfree; see the resolve-video job for why). The extension pulls it directly and
+      # shows its link for IDM.
+      - name: Publish as Release (Netfree-friendly download)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # these jobs don't checkout, so gh needs this
+          TAG: dl-${{ inputs.request_id }}
+        run: |
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" --title "$TAG" --notes "Automated download - safe to delete."
+          # gh treats each asset arg as a glob pattern, so yt-dlp's [id] brackets (and any
+          # * ? in a title) match nothing -> "no matches found". Escape those metachars so
+          # gh matches the literal file. find handles spaces; sed backslash-escapes globs.
+          find out -type f -print0 | while IFS= read -r -d '' f; do
+            esc=$(printf '%s' "$f" | sed 's/[][*?\\]/\\&/g')
+            gh release upload "$TAG" "$esc" --clobber
+          done
+          # Keep the Releases page tidy: drop auto bundles beyond the newest 25.
+          # Wrapped so an empty list (grep exit 1 under pipefail) never fails the job.
+          {
+            gh release list --limit 200 --json tagName,createdAt \
+              --jq 'sort_by(.createdAt) | reverse | .[].tagName' 2>/dev/null \
+              | grep '^dl-' | tail -n +26 \
+              | while read -r old; do gh release delete "$old" --yes --cleanup-tag 2>/dev/null || true; done
+          } || true
+
+      - name: Upload artifact (fallback for non-Netfree / private repos)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dl-${{ inputs.request_id }}
+          path: out/
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube Proxy</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="hd">
+        <div class="hd__logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20">
+            <path fill="currentColor" d="M17 18v1.5H7V18h10zM12 3v9.4l3.2-3.2 1.06 1.06L11.99 15 7.74 10.32 8.8 9.26 12 12.4V3z" />
+          </svg>
+        </div>
+        <div class="hd__title">
+          <h1>YouTube Proxy</h1>
+          <div class="conn">
+            <span class="dot" id="conn-dot"></span>
+            <span class="conn__text" id="conn-text"></span>
+          </div>
+        </div>
+        <button class="icon-btn" id="settingsBtn" type="button" title="הגדרות" aria-label="הגדרות">
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="currentColor" d="M19.14 12.94a7.14 7.14 0 0 0 .06-.94 7.14 7.14 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.3 7.3 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.14.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.62-.06.94s.02.63.06.94L2.82 14.5a.5.5 0 0 0-.12.64l1.92 3.32c.14.24.42.32.66.22l2.39-.96c.49.38 1.04.7 1.63.94l.36 2.54c.05.24.26.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.24 1.14-.56 1.63-.94l2.39.96c.24.1.52.02.66-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/>
+          </svg>
+        </button>
+      </header>
+
+      <section class="banner" id="setupBanner" hidden>
+        <span id="setupText">צריך להגדיר טוקן GitHub</span>
+        <button class="btn" id="setupBtn" type="button">הגדרות</button>
+      </section>
+
+      <section class="banner banner--update" id="updateBanner" hidden>
+        <span id="updateText">יש גרסה חדשה</span>
+        <button class="btn btn--primary" id="updateBtn" type="button">עדכן עכשיו</button>
+      </section>
+
+      <section class="card">
+        <label class="field__label" for="urlInput" id="urlLabel">קישור לוידאו, פלייליסט או ערוץ (אפשר כמה קישורים יחד)</label>
+        <div class="url-row">
+          <input id="urlInput" class="input" type="text" placeholder="https://www.youtube.com/watch?v=... או ערוץ שלם" dir="ltr" autocomplete="off" spellcheck="false" />
+          <button class="btn" id="pasteBtn" type="button">הדבק</button>
+        </div>
+        <p class="hint" id="urlHint">&nbsp;</p>
+
+        <div class="preview" id="preview" hidden>
+          <img id="previewThumb" class="preview__thumb" alt="" />
+          <div class="preview__title" id="previewTitle"></div>
+        </div>
+
+        <span class="badge" id="collectionBadge" hidden>זוהה כערוץ/פלייליסט — יורד ונארז ל-ZIP אחד</span>
+
+        <div class="field-row">
+          <label class="field__label" for="collectionToggle">הורדת אוסף שלם (ZIP אחד בשם הערוץ)</label>
+          <input type="checkbox" id="collectionToggle" class="switch" />
+        </div>
+
+        <div class="field field--select">
+          <label class="field__label" for="formatSelect">איכות</label>
+          <select id="formatSelect" class="input"></select>
+        </div>
+
+        <button class="btn btn--primary btn--block" id="downloadBtn" type="button" disabled>הורדה</button>
+      </section>
+
+      <section class="card">
+        <h2 style="margin:0;font-size:14px;">הורדות</h2>
+        <div class="job-list" id="jobList">
+          <div class="job-empty" id="jobEmpty">אין הורדות עדיין</div>
+        </div>
+      </section>
+
+      <footer>הלשונית הזו יכולה להישאר פתוחה או להיסגר — ההורדות ממשיכות ברקע בכל מקרה, ומתעדכנות כאן כשחוזרים אליה.</footer>
+    </main>
+    <script src="panel.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="he">
+  <head>
+    <meta charset="UTF-8" />
+    <title>YouTube Proxy — unpack</title>
+  </head>
+  <body>
+    <!-- Invisible offscreen document. It downloads the GitHub artifact zip, unpacks
+         it in memory and hands blob: URLs back to the service worker, which cannot
+         call URL.createObjectURL itself. -->
+    <script src="vendor/fflate.js"></script>
+    <script src="offscreen.js"></script>
+  </body>
+</html>

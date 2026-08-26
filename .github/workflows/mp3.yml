@@ -1,0 +1,239 @@
+name: mp3
+run-name: mp3-${{ inputs.request_id }}
+
+# Standalone workflow: converts the videos of an ALREADY COMPLETED collection run into
+# MP3s, keeping the album folder structure, and publishes one organised ZIP as a Release.
+#
+# Why it reads a previous run instead of downloading from YouTube again: YouTube answers
+# GitHub's datacenter IPs with "Sign in to confirm you're not a bot" unless cookies are
+# supplied, and a manual dispatch has no cookies. The source run already downloaded every
+# item successfully, so reusing those artifacts avoids YouTube entirely - no cookies, no
+# bot checks, and no re-downloading gigabytes from the internet.
+#
+# Independent by design: its own file, its own name and its own concurrency group, so it
+# never queues behind or cancels the extension's download.yml runs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'Unique id (used for run-name, artifact + release tag)'
+        required: true
+        type: string
+      source_run_id:
+        description: 'Run id of the finished collection run whose item artifacts to convert'
+        required: true
+        type: string
+      zip_name:
+        description: 'Base name for the ZIP (no extension)'
+        required: false
+        default: 'mp3'
+        type: string
+      bitrate_q:
+        description: 'libmp3lame VBR quality: 0=best/biggest .. 9=worst. 2 is ~190kbps.'
+        required: false
+        default: '2'
+        type: string
+
+permissions:
+  contents: write # publish the ZIP as a Release asset (github.com download)
+  actions: read   # list + download the source run's artifacts
+
+concurrency:
+  group: mp3-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  # ----------------------------------------------- list the source run's item artifacts
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      parts: ${{ steps.list.outputs.parts }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - name: Validate request id
+        run: |
+          case "${{ inputs.request_id }}" in
+            *[!a-zA-Z0-9-]*|"") echo "::error::request_id must be [a-zA-Z0-9-] only"; exit 1;;
+          esac
+
+      - name: List item artifacts of the source run
+        id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SRC: ${{ inputs.source_run_id }}
+        run: |
+          # Only the per-item parts (...-item-N); a run's final package, if any, would
+          # duplicate their contents.
+          gh api "repos/$GH_REPO/actions/runs/$SRC/artifacts?per_page=100" --paginate \
+            --jq '[.artifacts[] | select(.expired==false) | select(.name|test("-item-[0-9]+$")) | .name]' \
+            > parts.json
+          python - <<'PY'
+          import json, os
+          parts = sorted(set(json.load(open("parts.json"))))
+          if not parts:
+              print("::error::no unexpired item artifacts on that run - they may have expired (1 day retention)")
+              raise SystemExit(1)
+          print(f"converting {len(parts)} parts")
+          for p in parts:
+              print("  " + p)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"parts={json.dumps(parts)}\n")
+              f.write(f"count={len(parts)}\n")
+          PY
+
+  # ------------------------------------------- convert one part to MP3 (fully parallel)
+  convert:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    continue-on-error: true # one bad part must not lose the rest
+    strategy:
+      fail-fast: false
+      max-parallel: 20 # GitHub Free runs ~20 jobs at once; use all of them
+      matrix:
+        part: ${{ fromJson(needs.plan.outputs.parts) }}
+    name: convert ${{ matrix.part }}
+    steps:
+      - name: Fetch this part
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.part }}
+          path: src
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Install ffmpeg
+        run: |
+          # pip wheel instead of apt: one download, no package resolution (~9s vs ~30s)
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet imageio-ffmpeg
+          FFMPEG_BIN=$(python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")
+          chmod +x "$FFMPEG_BIN"
+          echo "FFMPEG_BIN=$FFMPEG_BIN" >> "$GITHUB_ENV"
+
+      - name: Write the converter
+        run: |
+          # Kept in its own file so xargs can run several copies at once; every filename
+          # is passed as one argument, so spaces, [brackets] and Hebrew are all safe.
+          cat > "$RUNNER_TEMP/conv.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          f="$1"
+          rel="${f#src/}"
+          dir=$(dirname "$rel")
+          base=$(basename "$rel")
+          stem="${base%.*}"
+          if [ "$dir" = "." ]; then
+            outdir="out"
+            album=""
+          else
+            outdir="out/$dir"
+            album=$(basename "$dir" | tr '_' ' ')
+          fi
+          mkdir -p "$outdir"
+          args=(-hide_banner -loglevel error -y -i "$f" -vn -map_metadata 0 -c:a libmp3lame -q:a "$QV" -id3v2_version 3)
+          if [ -n "$album" ]; then
+            args+=(-metadata "album=$album")
+          fi
+          if "$FFMPEG_BIN" "${args[@]}" "$outdir/$stem.mp3"; then
+            echo "ok: $rel"
+          else
+            echo "::warning::conversion failed: $rel"
+          fi
+          SH
+          chmod +x "$RUNNER_TEMP/conv.sh"
+
+      - name: Convert to MP3 (album folders preserved)
+        env:
+          QV: ${{ inputs.bitrate_q }}
+        run: |
+          mkdir -p out
+          # 4 ffmpeg processes at once (the runner has 4 vCPU) - this is the whole speed
+          # story for this job. Each file keeps its relative path, so a video that sat in
+          # out/<album>/ becomes out/<album>/<song>.mp3 and the album folders survive into
+          # the ZIP. The album tag is taken from that folder name too, so music players
+          # group the songs even outside the folder.
+          export FFMPEG_BIN QV
+          find src -type f \
+            \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.m4a' \
+               -o -iname '*.opus' -o -iname '*.mov' -o -iname '*.avi' \) -print0 \
+            | xargs -0 -P 4 -n 1 "$RUNNER_TEMP/conv.sh"
+          echo "--- produced $(find out -type f -name '*.mp3' | wc -l) mp3 files ---"
+          du -sh out || true
+
+      - name: Upload converted part
+        if: hashFiles('out/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: mp3-${{ inputs.request_id }}-part-${{ strategy.job-index }}
+          path: out/
+          retention-days: 1
+          compression-level: 0 # mp3 is already compressed; storing is much faster
+
+  # ------------------------------------------------- one organised ZIP + Release upload
+  package:
+    needs: [plan, convert]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    # The earlier collection run died here because zipping 25 GB blew a 15-minute timeout
+    # mid-zip. MP3s are far smaller, but the limit is generous now regardless.
+    timeout-minutes: 120
+    steps:
+      - name: Collect every converted part
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mp3-${{ inputs.request_id }}-part-*
+          path: merged
+          merge-multiple: true
+
+      - name: Build the ZIP
+        env:
+          ZIP_NAME: ${{ inputs.zip_name }}
+        run: |
+          mkdir -p out
+          if [ -z "$(ls -A merged 2>/dev/null)" ]; then
+            echo "::error::no MP3s were produced"
+            exit 1
+          fi
+          echo "albums / folders:"
+          find merged -mindepth 1 -maxdepth 1 -type d | sed 's#merged/#  #' | sort
+          echo "loose files in root: $(find merged -maxdepth 1 -type f | wc -l)"
+          # -0 (store): MP3 does not compress, so this is far faster at the same size.
+          (cd merged && zip -r -0 -q "../out/${ZIP_NAME}.zip" .)
+          echo "total mp3 files: $(find merged -type f -name '*.mp3' | wc -l)"
+          ls -lh out
+
+      - name: Publish as Release (github.com download - works behind Netfree)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # no checkout here, so gh needs this
+          TAG: mp3-${{ inputs.request_id }}
+        run: |
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" --title "$TAG" --notes "MP3 conversion - safe to delete."
+          # A release asset is capped at 2 GB, so split only if we actually exceed it.
+          SIZE=$(stat -c %s out/*.zip)
+          if [ "$SIZE" -gt 1900000000 ]; then
+            echo "zip is $((SIZE/1048576))MB - splitting into parts under 2GB"
+            BASE=$(ls out/*.zip | head -1)
+            (cd out && zip -s 1800m -0 -q --out parts.zip "$(basename "$BASE")" && rm -f "$(basename "$BASE")")
+          fi
+          # gh globs each asset path, so escape [] * ? to match literal filenames
+          find out -type f -print0 | while IFS= read -r -d '' f; do
+            esc=$(printf '%s' "$f" | sed 's/[][*?\\]/\\&/g')
+            gh release upload "$TAG" "$esc" --clobber
+          done
+          echo "assets: $(gh release view "$TAG" --json assets --jq '[.assets[].name]|join(", ")')"
+
+      - name: Upload artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mp3-${{ inputs.request_id }}
+          path: out/
+          retention-days: 2
+          if-no-files-found: error
+          compression-level: 0

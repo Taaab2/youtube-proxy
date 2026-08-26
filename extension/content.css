@@ -1,0 +1,111 @@
+/* Only for the bits YouTube's own classes don't cover: the fallback button (used when
+   the native markup couldn't be harvested), the quality menu and the toast.
+
+   Theme note: YouTube does NOT follow prefers-color-scheme — it sets a `dark`
+   attribute on <html> and users pick the theme in YouTube's own settings. Measured on
+   a real watch page: OS said light-mode while YouTube rendered light, but the two are
+   independent, so keying off the OS would mis-colour the button for anyone whose
+   YouTube theme differs from their system theme. Light is the default here, `html[dark]`
+   overrides — matching how YouTube itself does it.
+
+   Sizes below (40px tall, 20px radius) were measured off the real Share button
+   sitting next to ours, so it doesn't render visibly smaller than its neighbours. */
+
+.ytproxy-action {
+  display: inline-flex;
+  align-items: center;
+}
+
+.ytproxy-fallback-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: 20px;
+  padding: 0 16px;
+  height: 40px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--yt-spec-text-primary, #0f0f0f);
+}
+.ytproxy-fallback-btn:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+.ytproxy-fallback-btn[disabled] {
+  opacity: 0.6;
+  cursor: default;
+}
+.ytproxy-fallback-btn .yt-spec-button-shape-next__icon {
+  width: 24px;
+  height: 24px;
+}
+html[dark] .ytproxy-fallback-btn {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--yt-spec-text-primary, #f1f1f1);
+}
+html[dark] .ytproxy-fallback-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.ytproxy-menu {
+  position: absolute;
+  z-index: 9000;
+  min-width: 200px;
+  padding: 6px;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #0f0f0f;
+  box-shadow: 0 4px 32px rgba(0, 0, 0, 0.2);
+  font-size: 14px;
+  direction: rtl;
+}
+html[dark] .ytproxy-menu {
+  background: #282828;
+  color: #f1f1f1;
+  box-shadow: 0 4px 32px rgba(0, 0, 0, 0.5);
+}
+.ytproxy-menu__item {
+  display: block;
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ytproxy-menu__item:hover,
+.ytproxy-menu__item:focus-visible {
+  background: rgba(0, 0, 0, 0.08);
+}
+html[dark] .ytproxy-menu__item:hover,
+html[dark] .ytproxy-menu__item:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ytproxy-toast {
+  position: fixed;
+  z-index: 9100;
+  bottom: 24px;
+  inset-inline-start: 24px;
+  max-width: 380px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: #1f2738;
+  color: #eef2f8;
+  font-size: 13.5px;
+  line-height: 1.5;
+  direction: rtl;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+.ytproxy-toast.is-error {
+  background: #5b2320;
+  color: #ffdedb;
+}

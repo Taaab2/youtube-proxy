@@ -33,10 +33,6 @@ on:
         default: ''
         type: string
 
-permissions:
-  contents: write # needed to publish the finished file as a Release asset (github.com
-                  # download, which works behind Netfree unlike the artifact CDN)
-
 concurrency:
   group: dl-${{ inputs.request_id }}
   cancel-in-progress: false
@@ -200,37 +196,7 @@ jobs:
         if: always()
         run: rm -f cookies.txt
 
-      # Publish the finished file as a Release asset. Its download URL lives on
-      # github.com / githubusercontent.com - the same domains the extension's own
-      # self-updater already pulls from behind Netfree - whereas the Actions artifact
-      # below is served from Azure blob storage, which Netfree blocks. The extension
-      # downloads the release asset directly and also shows its link for IDM.
-      - name: Publish as Release (Netfree-friendly download)
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }} # these jobs don't checkout, so gh needs this
-          TAG: dl-${{ inputs.request_id }}
-        run: |
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" --title "$TAG" --notes "Automated download - safe to delete."
-          # gh treats each asset arg as a glob pattern, so yt-dlp's [id] brackets (and any
-          # * ? in a title) match nothing -> "no matches found". Escape those metachars so
-          # gh matches the literal file. find handles spaces; sed backslash-escapes globs.
-          find out -type f -print0 | while IFS= read -r -d '' f; do
-            esc=$(printf '%s' "$f" | sed 's/[][*?\\]/\\&/g')
-            gh release upload "$TAG" "$esc" --clobber
-          done
-          # Keep the Releases page tidy: drop auto bundles beyond the newest 25.
-          # Wrapped so an empty list (grep exit 1 under pipefail) never fails the job.
-          {
-            gh release list --limit 200 --json tagName,createdAt \
-              --jq 'sort_by(.createdAt) | reverse | .[].tagName' 2>/dev/null \
-              | grep '^dl-' | tail -n +26 \
-              | while read -r old; do gh release delete "$old" --yes --cleanup-tag 2>/dev/null || true; done
-          } || true
-
-      - name: Upload artifact (fallback for non-Netfree / private repos)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dl-${{ inputs.request_id }}
@@ -646,35 +612,7 @@ jobs:
           (cd merged && zip -r -q "../out/${{ needs.enumerate.outputs.collection_name }}.zip" .)
           echo "packaged $(find merged -type f | wc -l) of ${{ needs.enumerate.outputs.item_count }} items"
 
-      # Publish the single ZIP as a Release asset (github.com download that works behind
-      # Netfree; see the resolve-video job for why). The extension pulls it directly and
-      # shows its link for IDM.
-      - name: Publish as Release (Netfree-friendly download)
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }} # these jobs don't checkout, so gh needs this
-          TAG: dl-${{ inputs.request_id }}
-        run: |
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" --title "$TAG" --notes "Automated download - safe to delete."
-          # gh treats each asset arg as a glob pattern, so yt-dlp's [id] brackets (and any
-          # * ? in a title) match nothing -> "no matches found". Escape those metachars so
-          # gh matches the literal file. find handles spaces; sed backslash-escapes globs.
-          find out -type f -print0 | while IFS= read -r -d '' f; do
-            esc=$(printf '%s' "$f" | sed 's/[][*?\\]/\\&/g')
-            gh release upload "$TAG" "$esc" --clobber
-          done
-          # Keep the Releases page tidy: drop auto bundles beyond the newest 25.
-          # Wrapped so an empty list (grep exit 1 under pipefail) never fails the job.
-          {
-            gh release list --limit 200 --json tagName,createdAt \
-              --jq 'sort_by(.createdAt) | reverse | .[].tagName' 2>/dev/null \
-              | grep '^dl-' | tail -n +26 \
-              | while read -r old; do gh release delete "$old" --yes --cleanup-tag 2>/dev/null || true; done
-          } || true
-
-      - name: Upload artifact (fallback for non-Netfree / private repos)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dl-${{ inputs.request_id }}

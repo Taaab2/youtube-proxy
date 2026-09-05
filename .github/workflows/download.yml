@@ -167,35 +167,24 @@ jobs:
           rm -f cookies.txt
           ls -la out
 
-      # Always deliver a single zip, named after the downloaded file itself (not the
-      # request id), so the file the user gets back matches the file that's inside it.
-      # -j (junk paths) keeps the zip's internal listing flat, i.e. just the filename(s),
-      # not an "out/" prefix.
-      - name: Zip result
+      - name: Check something was downloaded
         if: success()
         run: |
           if [ -z "$(ls -A out 2>/dev/null)" ]; then
-            echo "::error::nothing was downloaded, cannot zip"
+            echo "::error::nothing was downloaded"
             exit 1
           fi
-          mkdir -p packaged
-          # yt-dlp can emit more than one file for a single item (e.g. a separate
-          # thumbnail or subtitle alongside the video/audio). Name the zip after the
-          # first (usually the actual media) file so the zip name still matches what's
-          # inside; every file found still gets included in the zip.
-          SRC=$(find out -type f | sort | head -n 1)
-          BASE=$(basename "$SRC")
-          NAME="${BASE%.*}"
-          zip -r -j -q "packaged/${NAME}.zip" out
-          rm -rf out
-          mkdir out
-          mv "packaged/${NAME}.zip" out/
           ls -la out
 
       - name: Always drop cookies
         if: always()
         run: rm -f cookies.txt
 
+      # No zip step here: downloading an artifact via the API/direct-link route always
+      # wraps it in GitHub's own zip container anyway (see the extension's "direct link"
+      # feature), so pre-zipping here only produced a zip-inside-a-zip. Uploading the raw
+      # file(s) means one extraction gets you straight to the real file(s) with their real
+      # name(s) — GitHub's own wrapper is still a zip, so downloads are still always a zip.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -602,21 +591,23 @@ jobs:
           path: merged
           merge-multiple: true
 
-      - name: Zip the collection
+      - name: Check the collection has files
         run: |
-          mkdir -p out
           if [ -z "$(ls -A merged 2>/dev/null)" ]; then
             echo "::error::every item in this collection failed to download"
             exit 1
           fi
-          (cd merged && zip -r -q "../out/${{ needs.enumerate.outputs.collection_name }}.zip" .)
           echo "packaged $(find merged -type f | wc -l) of ${{ needs.enumerate.outputs.item_count }} items"
 
+      # No zip step here, for the same reason as the single-video job: GitHub's own
+      # artifact wrapper already zips whatever is uploaded (preserving the playlist
+      # subfolders from "merged/"), so zipping it ourselves first only produced a
+      # zip-inside-a-zip when downloaded via the raw artifact/direct link.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dl-${{ inputs.request_id }}
-          path: out/
+          path: merged/
           retention-days: 1
           if-no-files-found: error
           compression-level: 0
